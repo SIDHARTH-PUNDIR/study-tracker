@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { subscribeToRoomEvents } from '../lib/supabase';
-import { isCloudEnabled, supabase } from '../lib/supabase';
+import { subscribeToRoomEvents, isCloudEnabled, supabase, saveCustomSupabaseConfig } from '../lib/supabase';
 
 const getSafeSessions = (userId) => {
   try {
@@ -12,25 +11,69 @@ const getSafeSessions = (userId) => {
   }
 };
 
-export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDarkMode }) {
+const getInitialTimerState = () => {
+  try {
+    const saved = localStorage.getItem('global_room_timer_state');
+    if (saved) {
+      const data = JSON.parse(saved);
+      let elapsed = typeof data.elapsedSeconds === 'number' ? data.elapsedSeconds : 0;
+      // If timer was actively running, calculate real time elapsed since last record
+      if (data.timerStatus === 'running' && typeof data.lastTick === 'number') {
+        const diffSeconds = Math.floor((Date.now() - data.lastTick) / 1000);
+        elapsed += Math.max(0, diffSeconds);
+      }
+      return {
+        status: data.timerStatus || 'stopped',
+        elapsed,
+        mode: data.timerMode || 'stopwatch',
+        target: typeof data.targetDuration === 'number' ? data.targetDuration : 50 * 60
+      };
+    }
+  } catch {
+    // default
+  }
+  return { status: 'stopped', elapsed: 0, mode: 'stopwatch', target: 50 * 60 };
+};
+
+const saveTimerStateToStorage = (status, elapsed, mode, target) => {
+  try {
+    localStorage.setItem('global_room_timer_state', JSON.stringify({
+      timerStatus: status,
+      elapsedSeconds: elapsed,
+      timerMode: mode,
+      targetDuration: target,
+      lastTick: Date.now()
+    }));
+  } catch {
+    // ignore storage limits
+  }
+};
+
+export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
   const userId = user?.id || 'guest';
   const userName = user?.name || 'Guest User';
 
-  // Shared Timer State
-  const [timerStatus, setTimerStatus] = useState('stopped'); // 'stopped' | 'running' | 'paused'
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [timerMode, setTimerMode] = useState('stopwatch'); // 'stopwatch' | 'countdown'
-  const [targetDuration, setTargetDuration] = useState(50 * 60); // 50 mins default target
+  const initialTimer = getInitialTimerState();
+  // Shared Timer State resilient to web refreshes
+  const [timerStatus, setTimerStatus] = useState(initialTimer.status); // 'stopped' | 'running' | 'paused'
+  const [elapsedSeconds, setElapsedSeconds] = useState(initialTimer.elapsed);
+  const [timerMode, setTimerMode] = useState(initialTimer.mode); // 'stopwatch' | 'countdown'
+  const [targetDuration, setTargetDuration] = useState(initialTimer.target); // 50 mins default
 
-  // Live real-time ticker for room clock
+  // Live real-time ticker for header room clock in 12-hour AM/PM format
   const [realTime, setRealTime] = useState(() => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }));
+
+  // Cloud Sync Setup Modal visibility
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [inputUrl, setInputUrl] = useState(() => localStorage.getItem('study_supabase_url') || '');
+  const [inputKey, setInputKey] = useState(() => localStorage.getItem('study_supabase_key') || '');
 
   // Personal user state for today
   const [objectiveText, setObjectiveText] = useState(() => {
-    try { return localStorage.getItem(`obj_text_${userId}_${roomCode}`) || ''; } catch { return ''; }
+    try { return localStorage.getItem(`obj_text_${userId}_GLOBAL`) || ''; } catch { return ''; }
   });
   const [objectiveCompleted, setObjectiveCompleted] = useState(() => {
-    try { return localStorage.getItem(`obj_done_${userId}_${roomCode}`) === 'true'; } catch { return false; }
+    try { return localStorage.getItem(`obj_done_${userId}_GLOBAL`) === 'true'; } catch { return false; }
   });
   const [isOnBreak, setIsOnBreak] = useState(false);
   const [workStartTime] = useState(() => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }));
@@ -43,23 +86,56 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
     return tStatus === 'running' ? 'studying' : 'idle';
   };
 
-  // Connected Members list (Initialized safely with current user so rendering never crashes)
-  const [members, setMembers] = useState(() => ({
-    [userId]: {
+  // Connected Members list resilient to page refreshes via cache
+  const [members, setMembers] = useState(() => {
+    const defaultMe = {
       userId,
       name: userName,
-      status: 'idle',
-      objectiveText: '',
-      objectiveCompleted: false,
+      status: deriveStatus(isOnBreak, timerStatus),
+      objectiveText,
+      objectiveCompleted,
       workStartTime: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }),
-      breakSeconds: 0
+      breakSeconds: 0,
+      lastSeen: Date.now()
+    };
+    try {
+      const cached = JSON.parse(localStorage.getItem('global_room_members_cache') || '{}');
+      return { ...cached, [userId]: defaultMe };
+    } catch {
+      return { [userId]: defaultMe };
     }
-  }));
+  });
 
   const channelRef = useRef(null);
   const timerRef = useRef(null);
   const breakTimerRef = useRef(null);
   const myProfileRef = useRef({ userId, name: userName });
+  const currentTimerRef = useRef({ status: timerStatus, elapsed: elapsedSeconds, mode: timerMode, target: targetDuration });
+
+  // Keep refs synchronized to latest state for instantaneous broadcasts
+  useEffect(() => {
+    currentTimerRef.current = { status: timerStatus, elapsed: elapsedSeconds, mode: timerMode, target: targetDuration };
+    saveTimerStateToStorage(timerStatus, elapsedSeconds, timerMode, targetDuration);
+  }, [timerStatus, elapsedSeconds, timerMode, targetDuration]);
+
+  useEffect(() => {
+    myProfileRef.current = {
+      userId,
+      name: userName,
+      status: deriveStatus(isOnBreak, timerStatus),
+      objectiveText,
+      objectiveCompleted,
+      workStartTime,
+      breakSeconds,
+      lastSeen: Date.now()
+    };
+    // Cache member profiles to maintain visibility after refreshing browser
+    setMembers(prev => {
+      const updated = { ...prev, [userId]: myProfileRef.current };
+      try { localStorage.setItem('global_room_members_cache', JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+  }, [userId, userName, isOnBreak, timerStatus, objectiveText, objectiveCompleted, workStartTime, breakSeconds]);
 
   // 1. Live real-time clock ticker
   useEffect(() => {
@@ -69,45 +145,24 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Broadcast local profile presence state whenever it changes
+  // 2. Broadcast local presence & timer state over the live network channel
   const broadcastMyState = (overrides = {}) => {
-    const nextStatus = overrides.status !== undefined 
-      ? overrides.status 
-      : deriveStatus(isOnBreak, timerStatus);
-
-    const myState = {
-      userId,
-      name: userName,
-      status: nextStatus,
-      objectiveText: overrides.objectiveText !== undefined ? overrides.objectiveText : objectiveText,
-      objectiveCompleted: overrides.objectiveCompleted !== undefined ? overrides.objectiveCompleted : objectiveCompleted,
-      workStartTime: overrides.workStartTime !== undefined ? overrides.workStartTime : workStartTime,
-      breakSeconds: overrides.breakSeconds !== undefined ? overrides.breakSeconds : breakSeconds,
-      updatedAt: Date.now()
-    };
-
-    setMembers(prev => ({ ...prev, [userId]: myState }));
-
+    const nextState = { ...myProfileRef.current, ...overrides, lastSeen: Date.now() };
     if (channelRef.current) {
-      channelRef.current.broadcast('MEMBER_STATE_SYNC', myState);
+      channelRef.current.broadcast('MEMBER_STATE_SYNC', nextState);
     }
-
-    // Persist objective completion to local session records for daily calendar highlights
-    if (myState.objectiveCompleted !== objectiveCompleted) {
+    // Record objective completions to calendar history
+    if (overrides.objectiveCompleted !== undefined || overrides.objectiveText !== undefined) {
       const today = new Date().toISOString().split('T')[0];
       const sess = getSafeSessions(userId);
       const existingIdx = sess.findIndex(s => s && s.date === today);
       if (existingIdx >= 0) {
-        sess[existingIdx].objectiveCompleted = myState.objectiveCompleted;
-        sess[existingIdx].objectiveText = myState.objectiveText;
+        sess[existingIdx].objectiveCompleted = nextState.objectiveCompleted;
+        sess[existingIdx].objectiveText = nextState.objectiveText;
       } else {
-        sess.push({ date: today, objectiveCompleted: myState.objectiveCompleted, objectiveText: myState.objectiveText });
+        sess.push({ date: today, objectiveCompleted: nextState.objectiveCompleted, objectiveText: nextState.objectiveText });
       }
-      try {
-        localStorage.setItem(`sessions_${userId}`, JSON.stringify(sess));
-      } catch {
-        // ignore storage write errors
-      }
+      try { localStorage.setItem(`sessions_${userId}`, JSON.stringify(sess)); } catch {}
     }
   };
 
@@ -121,72 +176,102 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timerStatus, isOnBreak]);
 
-  // 3. Setup Realtime channels on mount
+  // 3. Setup Realtime channel & synchronization protocols
   useEffect(() => {
-    const { userId: curId, name: curName } = myProfileRef.current;
-    // Initial self state in member list
-    const initialMe = {
-      userId: curId,
-      name: curName,
-      status: deriveStatus(isOnBreak, timerStatus),
-      objectiveText,
-      objectiveCompleted,
-      workStartTime,
-      breakSeconds
-    };
-    setMembers(prev => ({ ...prev, [curId]: initialMe }));
+    const curMe = myProfileRef.current;
 
-    // Subscribe to broadcasts
-    const channel = subscribeToRoomEvents(roomCode, (evt) => {
+    // Subscribe to broadcasts from study partners
+    const channel = subscribeToRoomEvents('GLOBAL_STUDY_SPACE', (evt) => {
       if (!evt || !evt.event) return;
       const { event, payload } = evt;
 
       if (event === 'TIMER_UPDATE' && payload) {
-        setTimerStatus(payload.status || 'stopped');
+        if (payload.status) setTimerStatus(payload.status);
         if (typeof payload.elapsed === 'number') setElapsedSeconds(payload.elapsed);
         if (payload.mode) setTimerMode(payload.mode);
         if (typeof payload.targetDuration === 'number') setTargetDuration(payload.targetDuration);
+        saveTimerStateToStorage(payload.status || 'stopped', payload.elapsed || 0, payload.mode || 'stopwatch', payload.targetDuration || 3000);
       } else if (event === 'MEMBER_STATE_SYNC' && payload && payload.userId) {
-        setMembers(prev => ({ ...prev, [payload.userId]: payload }));
+        setMembers(prev => {
+          const updated = { ...prev, [payload.userId]: payload };
+          try { localStorage.setItem('global_room_members_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
       } else if (event === 'REQUEST_SYNC') {
+        // A study buddy joined or refreshed! Immediately send them our latest profile AND current timer!
         if (channelRef.current) {
-          channelRef.current.broadcast('MEMBER_STATE_SYNC', initialMe);
+          channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
+          channelRef.current.broadcast('TIMER_UPDATE', {
+            status: currentTimerRef.current.status,
+            elapsed: currentTimerRef.current.elapsed,
+            mode: currentTimerRef.current.mode,
+            targetDuration: currentTimerRef.current.target
+          });
+        }
+      } else if (event === 'presence_sync') {
+        if (channelRef.current) {
+          channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
         }
       }
     });
 
     channelRef.current = channel;
 
-    // Announce entry and request current timer/member state from existing peers
-    const timerId = setTimeout(() => {
+    // Announce presence and request current timer & member profiles from online peers
+    const initTimer = setTimeout(() => {
       if (channelRef.current) {
-        channelRef.current.broadcast('MEMBER_STATE_SYNC', initialMe);
-        channelRef.current.broadcast('REQUEST_SYNC', { newcomer: curId });
+        channelRef.current.broadcast('MEMBER_STATE_SYNC', curMe);
+        channelRef.current.broadcast('REQUEST_SYNC', { newcomer: userId });
       }
-    }, 400);
+    }, 300);
+
+    // Periodic live sync heartbeat (Every 5 seconds) so friends never drop out of sync on Vercel
+    const heartbeat = setInterval(() => {
+      if (channelRef.current) {
+        channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
+        if (currentTimerRef.current.status === 'running') {
+          channelRef.current.broadcast('TIMER_UPDATE', {
+            status: currentTimerRef.current.status,
+            elapsed: currentTimerRef.current.elapsed,
+            mode: currentTimerRef.current.mode,
+            targetDuration: currentTimerRef.current.target
+          });
+        }
+      }
+    }, 5000);
 
     return () => {
-      clearTimeout(timerId);
+      clearTimeout(initTimer);
+      clearInterval(heartbeat);
       if (channelRef.current) {
         channelRef.current.close();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomCode]);
+  }, []);
 
-  // 4. Shared Session Timer logic
+  // 4. Shared Session Timer ticker logic
   useEffect(() => {
     if (timerStatus === 'running') {
       timerRef.current = setInterval(() => {
-        setElapsedSeconds(prev => {
+        setElapsedSeconds((prev) => {
           const next = prev + 1;
-          if (timerMode === 'countdown' && next >= targetDuration) {
-            clearInterval(timerRef.current);
-            setTimerStatus('stopped');
-            if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification('StudyRoom Target Reached', { body: 'Great job! Your focus countdown has ended.' });
-            }
-            return 0;
+          saveTimerStateToStorage('running', next, timerMode, targetDuration);
+          // Broadcast live clock every 15 seconds while ticking
+          if (next % 15 === 0 && channelRef.current) {
+            channelRef.current.broadcast('TIMER_UPDATE', {
+              status: 'running',
+              elapsed: next,
+              mode: timerMode,
+              targetDuration
+            });
+          }
+          if (isCloudEnabled && supabase && next % 30 === 0) {
+            supabase.from('room_state').upsert({
+              room_id: 'GLOBAL_STUDY_SPACE',
+              timer_status: 'running',
+              timer_seconds: next
+            }).catch(() => {});
           }
           return next;
         });
@@ -203,13 +288,8 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
       breakTimerRef.current = setInterval(() => {
         setBreakSeconds(prev => {
           const next = prev + 1;
-          if (next % 15 === 0) {
-            if (channelRef.current) {
-              channelRef.current.broadcast('MEMBER_STATE_SYNC', {
-                ...members[myProfileRef.current.userId],
-                breakSeconds: next
-              });
-            }
+          if (next % 15 === 0 && channelRef.current) {
+            channelRef.current.broadcast('MEMBER_STATE_SYNC', { ...myProfileRef.current, breakSeconds: next });
           }
           return next;
         });
@@ -218,7 +298,6 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
       clearInterval(breakTimerRef.current);
     }
     return () => clearInterval(breakTimerRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnBreak]);
 
   // Handlers for Shared Timer actions
@@ -231,6 +310,7 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
     }
     setTimerStatus(newStatus);
     setElapsedSeconds(customElapsed);
+    saveTimerStateToStorage(newStatus, customElapsed, timerMode, effectiveTarget);
     
     if (channelRef.current) {
       channelRef.current.broadcast('TIMER_UPDATE', {
@@ -243,7 +323,7 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
 
     if (isCloudEnabled && supabase) {
       supabase.from('room_state').upsert({
-        room_id: roomCode,
+        room_id: 'GLOBAL_STUDY_SPACE',
         timer_status: newStatus,
         timer_seconds: customElapsed
       }).catch(() => {});
@@ -253,6 +333,7 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
   const handleUpdateTargetDuration = (newSeconds) => {
     const safeSeconds = Math.max(0, Math.min(24 * 3600, newSeconds));
     setTargetDuration(safeSeconds);
+    saveTimerStateToStorage(timerStatus, elapsedSeconds, timerMode, safeSeconds);
     if (channelRef.current) {
       channelRef.current.broadcast('TIMER_UPDATE', {
         status: timerStatus,
@@ -286,25 +367,18 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
     setIsOnBreak(newBreak);
     const newStatus = deriveStatus(newBreak, timerStatus);
     broadcastMyState({ status: newStatus });
-
-    if (!newBreak && 'Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
   };
 
   const handleObjectiveChange = (text, done) => {
     setObjectiveText(text);
     setObjectiveCompleted(done);
     try {
-      localStorage.setItem(`obj_text_${userId}_${roomCode}`, text);
-      localStorage.setItem(`obj_done_${userId}_${roomCode}`, done.toString());
-    } catch {
-      // ignore
-    }
+      localStorage.setItem(`obj_text_${userId}_GLOBAL`, text);
+      localStorage.setItem(`obj_done_${userId}_GLOBAL`, done.toString());
+    } catch { /* ignore */ }
     broadcastMyState({ objectiveText: text, objectiveCompleted: done });
   };
 
-  // Helper formatting
   const formatTime = (totalSeconds) => {
     const safeSecs = typeof totalSeconds === 'number' && !isNaN(totalSeconds) ? Math.max(0, totalSeconds) : 0;
     const hrs = Math.floor(safeSecs / 3600);
@@ -334,45 +408,96 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
   };
 
   return (
-    <div className="page-wrapper" style={{ padding: '2rem 1.5rem' }}>
-      {/* Zen Room Header */}
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+    <div className="page-wrapper" style={{ padding: '2rem 1.5rem', position: 'relative' }}>
+      {/* Real-time Cloud Sync Configuration Dialog */}
+      {showSyncModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+          <div className="panel" style={{ width: '100%', maxWidth: '480px', display: 'flex', flexDirection: 'column', gap: '1.25rem', border: '1px solid var(--border-color)' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-main)' }}>🌐 Enable Global Cloud Sync</h3>
+            <p className="text-muted" style={{ fontSize: '0.88rem', lineHeight: 1.5 }}>
+              When deployed on Vercel, peers on separate devices need a shared Supabase real-time channel to see each other's timers and calendars instantly.<br/><br/>
+              Enter your free Supabase URL and Anon Key below (or set them in Vercel project environment settings):
+            </p>
+            <div className="field-group" style={{ marginBottom: 0 }}>
+              <label className="field-label">Supabase Project URL</label>
+              <input 
+                type="text" 
+                placeholder="https://xyz.supabase.co"
+                value={inputUrl}
+                onChange={(e) => setInputUrl(e.target.value)}
+                className="field-input"
+              />
+            </div>
+            <div className="field-group" style={{ marginBottom: 0 }}>
+              <label className="field-label">Supabase Anon Key</label>
+              <input 
+                type="password" 
+                placeholder="ey.... (anon public key)"
+                value={inputKey}
+                onChange={(e) => setInputKey(e.target.value)}
+                className="field-input"
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+              <button onClick={() => setShowSyncModal(false)} className="btn btn-subtle">Cancel</button>
+              <button 
+                onClick={() => saveCustomSupabaseConfig(inputUrl, inputKey)}
+                className="btn btn-primary"
+              >
+                Save & Link Cloud
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Global Room Header */}
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
         <div>
-          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-            Shared Room
+          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            UNIFIED STUDY SPACE
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginTop: '0.25rem' }}>
-            <h1 style={{ fontSize: '1.75rem', fontWeight: 700, letterSpacing: '-0.03em' }}>{roomCode}</h1>
-            <span style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem', borderRadius: '4px', background: 'var(--bg-subtle)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
-              Live
-            </span>
+            <h1 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-main)' }}>GLOBAL ROOM</h1>
+            <span style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10B981', padding: '0.15rem 0.5rem', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 700, border: '1px solid rgba(16, 185, 129, 0.3)' }}>Live</span>
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', flexWrap: 'wrap' }}>
-          <div className="font-mono" style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+          {/* Real-time Cloud Link Badge */}
+          <button
+            onClick={() => setShowSyncModal(true)}
+            className="btn btn-subtle"
+            style={{ fontSize: '0.82rem', padding: '0.4rem 0.75rem', border: '1px solid var(--border-color)', background: isCloudEnabled ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)' }}
+            title="Click to manage live cloud synchronization across devices"
+          >
+            {isCloudEnabled ? '🟢 Live Cloud Connected' : '⚡ Setup Vercel Cloud Sync'}
+          </button>
+
+          <span className="mono" style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
             🕒 {realTime}
-          </div>
+          </span>
+
           <button 
             onClick={() => setDarkMode(!darkMode)}
             className="btn btn-subtle"
-            style={{ padding: '0.5rem 0.85rem', fontSize: '0.8rem', minHeight: 'auto' }}
-            title="Toggle Serene Dark Mode"
+            style={{ padding: '0.4rem 0.65rem' }}
+            title="Toggle Dark/Light theme"
           >
-            {darkMode ? '☀️ Light' : '🌙 Dark'}
+            {darkMode ? '🌙 Dark' : '☀️ Light'}
           </button>
+
           <button 
-            onClick={onLeaveRoom}
+            onClick={onLogout}
             className="btn btn-subtle"
-            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', minHeight: 'auto' }}
+            style={{ fontSize: '0.85rem', color: '#EF4444', borderColor: 'var(--border-color)' }}
           >
-            Leave room
+            Log Out
           </button>
         </div>
       </header>
 
-      {/* Main Focus Dashboard (Center aligned for immersion) */}
-      <div style={{ maxWidth: '820px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
         
         {/* Top Section: Shared Session Timer */}
         <section style={{ textAlign: 'center', padding: '1rem 0', borderBottom: '1px solid var(--border-color)' }}>
@@ -420,8 +545,8 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
                 minWidth: '130px', 
                 opacity: timerStatus === 'running' ? 0.4 : 1, 
                 cursor: timerStatus === 'running' ? 'not-allowed' : 'pointer',
-                borderColor: confirmReset ? '#D97706' : 'transparent',
-                color: confirmReset ? 'var(--calendar-done)' : 'var(--text-main)',
+                borderColor: confirmReset ? '#EF4444' : 'transparent',
+                color: confirmReset ? '#EF4444' : 'var(--text-main)',
                 fontWeight: confirmReset ? 600 : 500
               }}
               title={timerStatus === 'running' ? 'Pause timer first to reset shared clock' : 'Reset timer for everyone in room'}
@@ -559,7 +684,7 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
               type="checkbox"
               checked={objectiveCompleted}
               onChange={(e) => handleObjectiveChange(objectiveText, e.target.checked)}
-              style={{ width: '22px', height: '22px', accentColor: 'var(--calendar-done)', cursor: 'pointer', borderRadius: '4px' }}
+              style={{ width: '22px', height: '22px', accentColor: '#10B981', cursor: 'pointer', borderRadius: '4px' }}
               title="Mark today's objective completed"
             />
             <input 
@@ -579,13 +704,13 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
           </div>
         </section>
 
-        {/* Bottom Section: Connected Members Presence & Compact Calendar */}
+        {/* Bottom Section: Connected Members Presence & Full Month Focus Calendars */}
         <section>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
             <h3 style={{ fontSize: '0.95rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>
-              Room Members ({Object.keys(members).length})
+              Global Room Members ({Object.keys(members).length})
             </h3>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Live updates enabled</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Realtime global sync enabled</span>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '1.25rem' }}>
@@ -603,7 +728,7 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
               }
 
               return (
-                <div key={memberId} className="panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem', borderLeft: isMe ? '3px solid var(--calendar-done)' : '1px solid var(--border-color)' }}>
+                <div key={memberId} className="panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem', borderLeft: isMe ? '3px solid #10B981' : '1px solid var(--border-color)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                       <span style={{ fontWeight: 600, fontSize: '1rem' }}>{m?.name || 'Student'} {isMe && '(You)'}</span>
@@ -620,9 +745,12 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
                     </span>
                   </div>
 
-                  {/* Full Month Focus Calendar for member */}
+                  {/* Full Month Focus Calendar for member (Green = Work Done, Grey = No Work Done) */}
                   <div>
-                    <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Focus Calendar:</span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Focus Calendar:</span>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>🟢 Work Done • ⚪ No Work</span>
+                    </div>
                     <div style={{ 
                       display: 'grid', 
                       gridTemplateColumns: 'repeat(7, 1fr)', 
@@ -630,7 +758,6 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
                       background: 'var(--bg-app)',
                       padding: '0.75rem',
                       borderRadius: 'var(--radius)',
-                      marginTop: '0.5rem',
                       border: '1px solid var(--border-color)'
                     }}>
                       {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, idx) => (
@@ -644,6 +771,11 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
                         const isPastOrToday = dayNum <= currentDay;
                         const isToday = dayNum === currentDay;
 
+                        // Green (#10B981) if work is done; Grey if no work done
+                        const cellBackground = isDone ? '#10B981' : (isPastOrToday ? 'var(--border-color)' : 'transparent');
+                        const cellColor = isDone ? '#FFFFFF' : 'var(--text-muted)';
+                        const cellOpacity = isPastOrToday || isDone ? 1 : 0.25;
+
                         return (
                           <div 
                             key={`day-${dayNum}`}
@@ -654,14 +786,14 @@ export default function StudyRoom({ roomCode, user, onLeaveRoom, darkMode, setDa
                               justifyContent: 'center',
                               fontSize: '0.72rem',
                               borderRadius: '0.25rem',
-                              background: isDone ? 'var(--calendar-done)' : (isPastOrToday ? 'var(--status-studying)' : 'transparent'),
-                              color: isDone ? 'var(--calendar-done-text)' : (isPastOrToday ? '#0C0A09' : 'var(--text-muted)'),
+                              background: cellBackground,
+                              color: cellColor,
                               fontWeight: isPastOrToday || isDone ? 700 : 400,
-                              border: isToday && !isDone ? '2px solid #0C0A09' : 'none',
-                              boxShadow: isPastOrToday || isDone ? '0 1px 3px rgba(0,0,0,0.2)' : 'none',
-                              opacity: isPastOrToday ? 1 : 0.4
+                              border: isToday && !isDone ? '2px solid var(--text-muted)' : 'none',
+                              boxShadow: isDone ? '0 1px 3px rgba(16, 185, 129, 0.3)' : 'none',
+                              opacity: cellOpacity
                             }}
-                            title={`Day ${dayNum}: ${isDone ? 'Objective completed 🏆' : (isPastOrToday ? 'Study active 🟢' : 'Upcoming')}`}
+                            title={`Day ${dayNum}: ${isDone ? 'Work completed 🟢' : (isPastOrToday ? 'No work done ⚪' : 'Upcoming')}`}
                           >
                             {dayNum}
                           </div>

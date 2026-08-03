@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { getCurrentUser, logoutUser } from './utils/auth';
 import Landing from './components/Landing';
 import { SignUpScreen, LogInScreen } from './components/AuthScreens';
-import Dashboard from './components/Dashboard';
 import StudyRoom from './components/StudyRoom';
 
 class ErrorBoundary extends React.Component {
@@ -28,14 +27,13 @@ class ErrorBoundary extends React.Component {
             </p>
             <button 
               onClick={() => {
-                localStorage.removeItem('last_active_room_code');
-                window.location.hash = '/dashboard';
+                window.location.hash = '/global';
                 window.location.reload();
               }}
               className="btn btn-primary"
               style={{ width: '100%' }}
             >
-              Return to Safe Dashboard
+              Reload Global Study Space
             </button>
           </div>
         </div>
@@ -47,8 +45,8 @@ class ErrorBoundary extends React.Component {
 
 export default function App() {
   const [user, setUser] = useState(() => getCurrentUser());
-  const [view, setView] = useState(() => (user ? 'dashboard' : 'landing'));
-  const [activeRoomCode, setActiveRoomCode] = useState('');
+  // Directly route authenticated users into the Global Study Room
+  const [view, setView] = useState(() => (user ? 'room' : 'landing'));
   
   // Theme management
   const [darkMode, setDarkMode] = useState(() => {
@@ -64,66 +62,33 @@ export default function App() {
     localStorage.setItem('study_room_dark', darkMode.toString());
   }, [darkMode]);
 
-  // Handle URL Hash deep-link routing (e.g. #/room/ZEN-44)
+  // Handle URL Hash deep-link routing
   useEffect(() => {
     const checkHash = () => {
       const hash = window.location.hash;
-      if (hash.startsWith('#/room/') || hash.startsWith('#room/')) {
-        const code = hash.split('/').pop();
-        if (code) {
-          setActiveRoomCode(code.toUpperCase());
-          if (user) {
-            setView('room');
-          } else {
-            // Remember room to jump in right after auth completes
-            localStorage.setItem('pending_room_join', code.toUpperCase());
-            setView('login');
-          }
-        }
-      } else if (hash.startsWith('#/dashboard') || hash === '#dashboard' || hash === '') {
-        if (user && view === 'room' && !activeRoomCode) {
-          setView('dashboard');
-        }
+      if (!user && (hash.startsWith('#/global') || hash === '#global')) {
+        setView('login');
+      } else if (user && view !== 'room') {
+        setView('room');
       }
     };
 
     checkHash();
     window.addEventListener('hashchange', checkHash);
     return () => window.removeEventListener('hashchange', checkHash);
-  }, [user, view, activeRoomCode]);
+  }, [user, view]);
 
   const handleAuthSuccess = (authenticatedUser) => {
     setUser(authenticatedUser);
-    const pendingRoom = localStorage.getItem('pending_room_join') || localStorage.getItem('last_active_room_code');
-    if (pendingRoom && window.location.hash.includes(pendingRoom)) {
-      localStorage.removeItem('pending_room_join');
-      setActiveRoomCode(pendingRoom);
-      setView('room');
-      window.location.hash = `/room/${pendingRoom}`;
-    } else {
-      setView('dashboard');
-      window.location.hash = '/dashboard';
-    }
+    setView('room');
+    window.location.hash = '/global';
   };
 
   const handleLogout = () => {
     logoutUser();
     setUser(null);
-    setActiveRoomCode('');
     setView('landing');
     window.location.hash = '';
-  };
-
-  const handleJoinRoom = (code) => {
-    setActiveRoomCode(code);
-    setView('room');
-    window.location.hash = `/room/${code}`;
-  };
-
-  const handleLeaveRoom = () => {
-    setActiveRoomCode('');
-    setView('dashboard');
-    window.location.hash = '/dashboard';
   };
 
   // Render routing view engine wrapped in ErrorBoundary to prevent any blank screen
@@ -142,15 +107,11 @@ export default function App() {
           <LogInScreen onAuthSuccess={handleAuthSuccess} onNavigate={(nextView) => setView(nextView)} />
         )}
 
-        {user && view === 'dashboard' && (
-          <Dashboard user={user} onLogout={handleLogout} onJoinRoom={handleJoinRoom} />
-        )}
-
-        {user && view === 'room' && activeRoomCode && (
+        {user && view === 'room' && (
           <StudyRoom 
-            roomCode={activeRoomCode} 
+            roomCode="GLOBAL" 
             user={user} 
-            onLeaveRoom={handleLeaveRoom}
+            onLogout={handleLogout}
             darkMode={darkMode}
             setDarkMode={setDarkMode}
           />
