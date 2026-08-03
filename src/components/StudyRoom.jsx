@@ -120,6 +120,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
   const [breakSeconds, setBreakSeconds] = useState(0);
   const [confirmReset, setConfirmReset] = useState(false);
   const [studyHistory, setStudyHistory] = useState(() => getStudyTimeHistory(userId));
+  const [graphTimeframe, setGraphTimeframe] = useState('week'); // 'week' | 'month'
 
   // Helper: Derive presence status automatically from break toggle & timer status
   const deriveStatus = (isBreak, tStatus) => {
@@ -784,21 +785,24 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
                 doneDays.push(currentDay);
               }
 
-              // Calculate 7-Day Study Time History and Marathons for this member
+              // Calculate Study Time History and Marathons based on selected timeframe (Week vs Whole Month)
+              const numDays = graphTimeframe === 'month' ? 30 : 7;
               const memberHistory = m?.studyTimeHistory || getStudyTimeHistory(memberId);
-              const daysList = Array.from({ length: 7 }, (_, i) => {
+              const daysList = Array.from({ length: numDays }, (_, i) => {
                 const d = new Date();
                 if (d.getHours() < 5) d.setDate(d.getDate() - 1);
-                d.setDate(d.getDate() - (6 - i));
+                d.setDate(d.getDate() - ((numDays - 1) - i));
                 const key = d.toISOString().split('T')[0];
-                const label = i === 6 ? 'Today' : d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' }).split(',')[0];
+                const weekdayStr = d.toLocaleDateString([], { weekday: 'short' });
+                const monthDayStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                const label = i === (numDays - 1) ? 'Today' : (graphTimeframe === 'month' ? monthDayStr : weekdayStr);
                 const secs = memberHistory[key] || 0;
-                return { key, label, secs };
+                return { key, label, fullDate: `${weekdayStr}, ${monthDayStr}`, secs };
               });
 
-              const totalWeekSecs = daysList.reduce((acc, curr) => acc + curr.secs, 0);
-              const todaySecs = daysList[6]?.secs || 0;
-              const avgSecs = Math.floor(totalWeekSecs / 7);
+              const totalPeriodSecs = daysList.reduce((acc, curr) => acc + curr.secs, 0);
+              const todaySecs = daysList[numDays - 1]?.secs || 0;
+              const avgSecs = Math.floor(totalPeriodSecs / numDays);
               const maxDaySecs = Math.max(3600 * 4, ...daysList.map(d => d.secs)); // scale relative to at least 4 hours
 
               return (
@@ -821,52 +825,102 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
 
                   {/* 📈 Date vs. Time Study Duration & Marathon Graph */}
                   <div style={{ background: 'var(--bg-app)', padding: '1rem', borderRadius: 'var(--radius)', border: '1px solid var(--border-color)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.4rem' }}>
                       <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                         📈 Study Duration & Marathons
                       </span>
-                      <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#10B981', background: 'rgba(16, 185, 129, 0.15)', padding: '0.15rem 0.5rem', borderRadius: '999px', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
-                        Today: {formatDurationLabel(todaySecs)}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        {/* Week vs Month View Switch */}
+                        <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderRadius: '6px', padding: '0.15rem', border: '1px solid var(--border-color)' }}>
+                          <button 
+                            onClick={() => setGraphTimeframe('week')}
+                            style={{ 
+                              fontSize: '0.68rem', 
+                              padding: '0.2rem 0.5rem', 
+                              borderRadius: '4px', 
+                              border: 'none', 
+                              cursor: 'pointer',
+                              background: graphTimeframe === 'week' ? 'var(--accent)' : 'transparent',
+                              color: graphTimeframe === 'week' ? '#FFFFFF' : 'var(--text-muted)',
+                              fontWeight: graphTimeframe === 'week' ? 700 : 500
+                            }}
+                          >
+                            7 Days
+                          </button>
+                          <button 
+                            onClick={() => setGraphTimeframe('month')}
+                            style={{ 
+                              fontSize: '0.68rem', 
+                              padding: '0.2rem 0.5rem', 
+                              borderRadius: '4px', 
+                              border: 'none', 
+                              cursor: 'pointer',
+                              background: graphTimeframe === 'month' ? 'var(--accent)' : 'transparent',
+                              color: graphTimeframe === 'month' ? '#FFFFFF' : 'var(--text-muted)',
+                              fontWeight: graphTimeframe === 'month' ? 700 : 500
+                            }}
+                          >
+                            Whole Month (30d)
+                          </button>
+                        </div>
+
+                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#10B981', background: 'rgba(16, 185, 129, 0.15)', padding: '0.15rem 0.55rem', borderRadius: '999px', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                          Today: {formatDurationLabel(todaySecs)}
+                        </span>
+                      </div>
                     </div>
                     <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '1rem', fontStyle: 'italic' }}>
                       🌙 Sessions running across midnight up to 5 AM count in one continuous go!
                     </div>
 
                     {/* Bar Chart Container */}
-                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', height: '140px', gap: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', height: '140px', gap: graphTimeframe === 'month' ? '0.15rem' : '0.5rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
                       {daysList.map((col, idx) => {
-                        const isTodayCol = idx === 6;
+                        const isTodayCol = idx === (numDays - 1);
                         const barHeightPct = Math.max(4, Math.min(100, Math.round((col.secs / maxDaySecs) * 100)));
                         return (
-                          <div key={col.key} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.35rem', height: '100%', justifyContent: 'flex-end' }}>
-                            <span style={{ fontSize: '0.68rem', fontWeight: 600, color: col.secs > 0 ? 'var(--text-main)' : 'var(--text-muted)', textAlign: 'center' }}>
-                              {formatDurationLabel(col.secs)}
-                            </span>
+                          <div key={col.key} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.3rem', height: '100%', justifyContent: 'flex-end' }}>
+                            {graphTimeframe === 'week' && (
+                              <span style={{ fontSize: '0.7rem', fontWeight: 600, color: col.secs > 0 ? 'var(--text-main)' : 'var(--text-muted)', textAlign: 'center' }}>
+                                {formatDurationLabel(col.secs)}
+                              </span>
+                            )}
                             <div 
                               style={{
                                 width: '100%',
-                                maxWidth: '32px',
+                                maxWidth: graphTimeframe === 'month' ? '12px' : '36px',
                                 height: `${barHeightPct}%`,
                                 background: col.secs > 0 ? (isTodayCol ? '#10B981' : 'linear-gradient(to top, var(--bg-panel), #10B981)') : 'var(--bg-subtle)',
-                                borderRadius: '4px 4px 0 0',
+                                borderRadius: '3px 3px 0 0',
                                 border: col.secs > 0 ? '1px solid #059669' : '1px dashed var(--border-color)',
                                 transition: 'height 0.3s ease',
-                                boxShadow: col.secs > 0 && isTodayCol ? '0 0 8px rgba(16, 185, 129, 0.35)' : 'none'
+                                boxShadow: col.secs > 0 && isTodayCol ? '0 0 8px rgba(16, 185, 129, 0.35)' : 'none',
+                                cursor: 'pointer'
                               }}
-                              title={`${col.label} (${col.key}): Studied ${formatDurationLabel(col.secs)}`}
+                              title={`${col.fullDate} (${col.key}): Studied ${formatDurationLabel(col.secs)} in one go`}
                             />
-                            <span style={{ fontSize: '0.68rem', color: isTodayCol ? '#10B981' : 'var(--text-muted)', fontWeight: isTodayCol ? 700 : 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '44px' }}>
-                              {col.label}
-                            </span>
+                            {graphTimeframe === 'week' && (
+                              <span style={{ fontSize: '0.72rem', color: isTodayCol ? '#10B981' : 'var(--text-muted)', fontWeight: isTodayCol ? 700 : 500 }}>
+                                {col.label}
+                              </span>
+                            )}
                           </div>
                         );
                       })}
                     </div>
 
+                    {/* Month view horizontal timeline milestones */}
+                    {graphTimeframe === 'month' && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.4rem', fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 500 }}>
+                        <span>30d ago ({daysList[0]?.label})</span>
+                        <span>15d ago ({daysList[14]?.label})</span>
+                        <span style={{ color: '#10B981', fontWeight: 700 }}>Today</span>
+                      </div>
+                    )}
+
                     {/* Summary Footer */}
                     <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', marginTop: '0.75rem', fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600 }}>
-                      <span>🔥 7-Day Total: <strong style={{ color: '#10B981' }}>{formatDurationLabel(totalWeekSecs)}</strong></span>
+                      <span>🔥 {graphTimeframe === 'month' ? '30-Day Total' : '7-Day Total'}: <strong style={{ color: '#10B981' }}>{formatDurationLabel(totalPeriodSecs)}</strong></span>
                       <span>⚡ Daily Avg: <strong>{formatDurationLabel(avgSecs)}</strong></span>
                     </div>
                   </div>
