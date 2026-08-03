@@ -11,11 +11,14 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.0",
+    "@trystero-p2p/nostr": "^0.25.3",
+    "@trystero-p2p/torrent": "^0.25.3",
     "canvas-confetti": "^1.9.4",
     "lucide-react": "^1.28.0",
     "mqtt": "^5.15.2",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "trystero": "^0.25.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

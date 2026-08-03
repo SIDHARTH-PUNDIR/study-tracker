@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import mqtt from 'mqtt';
+import { joinRoom as joinNostr } from '@trystero-p2p/nostr';
+import { joinRoom as joinTorrent } from '@trystero-p2p/torrent';
 
 // Retrieve credentials from environment variables or runtime browser storage
 const getSupabaseConfig = () => {
@@ -33,7 +35,7 @@ export const saveCustomSupabaseConfig = (url, key) => {
 
 export const isCloudEnabled = !!supabase;
 
-// Universal Cloud Realtime Channel (enables global syncing across separate devices on Vercel with ZERO backend or keys required!)
+// Universal Cloud Realtime Channel (multi-network redundancy via Trystero WebRTC + SSL MQTT + Local channels)
 class UniversalCloudChannel {
   constructor(roomCode, onMessage) {
     this.roomCode = roomCode || 'GLOBAL_STUDY_SPACE';
@@ -53,9 +55,47 @@ class UniversalCloudChannel {
       // ignore if BroadcastChannel unsupported
     }
 
-    // 2. Global Free Realtime WSS Cloud Relay (EMQX Public WebSocket Broker) for internet / Vercel cross-device sync!
+    // 2. Trystero P2P WebRTC over Decentralized Torrent Trackers (Works over standard HTTPS port 443 WebSockets!)
     try {
-      this.client = mqtt.connect('wss://broker.emqx.io:8083/mqtt', {
+      this.torrentRoom = joinTorrent({ appId: 'study-tracker-global-space-2026' }, this.roomCode);
+      const [sendTorrent, getTorrent] = this.torrentRoom.makeAction('room_sync');
+      this.sendTorrent = sendTorrent;
+      getTorrent((data) => {
+        if (this.onMessage && data && data.senderId !== this.senderId) {
+          this.onMessage(data);
+        }
+      });
+      this.torrentRoom.onPeerJoin(() => {
+        if (this.onMessage) {
+          this.onMessage({ event: 'REQUEST_SYNC' });
+        }
+      });
+    } catch {
+      // ignore
+    }
+
+    // 3. Trystero P2P WebRTC over Global Nostr Relays (Bulletproof cross-network discovery over HTTPS!)
+    try {
+      this.nostrRoom = joinNostr({ appId: 'study-tracker-global-space-2026' }, this.roomCode);
+      const [sendNostr, getNostr] = this.nostrRoom.makeAction('room_sync');
+      this.sendNostr = sendNostr;
+      getNostr((data) => {
+        if (this.onMessage && data && data.senderId !== this.senderId) {
+          this.onMessage(data);
+        }
+      });
+      this.nostrRoom.onPeerJoin(() => {
+        if (this.onMessage) {
+          this.onMessage({ event: 'REQUEST_SYNC' });
+        }
+      });
+    } catch {
+      // ignore
+    }
+
+    // 4. Global Free WSS Cloud Broker on Standard SSL Port 8443 / 443 (Prevents firewall blockages on campus/office Wi-Fi)
+    try {
+      this.client = mqtt.connect('wss://broker.hivemq.com:8443/mqtt', {
         clientId: `st_client_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
         clean: true,
         reconnectPeriod: 2500,
@@ -63,14 +103,12 @@ class UniversalCloudChannel {
       });
 
       this.client.on('connect', () => {
-        console.log('🌐 Connected to Universal Global Realtime Network over WebSockets');
         this.client.subscribe(this.topic, { qos: 0 });
       });
 
       this.client.on('message', (topic, message) => {
         try {
           const data = JSON.parse(message.toString());
-          // Only process broadcasts sent by other study buddies over the network
           if (this.onMessage && data && data.senderId !== this.senderId) {
             this.onMessage(data);
           }
@@ -90,8 +128,15 @@ class UniversalCloudChannel {
     if (this.localChannel) {
       try { this.localChannel.postMessage(packet); } catch {}
     }
-
-    // Broadcast across the globe via WSS cloud relay
+    // Broadcast via WebRTC P2P (Torrent trackers)
+    if (this.sendTorrent) {
+      try { this.sendTorrent(packet); } catch {}
+    }
+    // Broadcast via WebRTC P2P (Nostr relays)
+    if (this.sendNostr) {
+      try { this.sendNostr(packet); } catch {}
+    }
+    // Broadcast via SSL WebSocket MQTT relay
     if (this.client && this.client.connected) {
       try {
         this.client.publish(this.topic, JSON.stringify(packet), { qos: 0 });
@@ -101,6 +146,8 @@ class UniversalCloudChannel {
 
   close() {
     if (this.localChannel) { try { this.localChannel.close(); } catch {} }
+    if (this.torrentRoom) { try { this.torrentRoom.leave(); } catch {} }
+    if (this.nostrRoom) { try { this.nostrRoom.leave(); } catch {} }
     if (this.client) { try { this.client.end(); } catch {} }
   }
 }
@@ -149,7 +196,6 @@ export const subscribeToRoomEvents = (roomCode, onEvent) => {
       }
     };
   } else {
-    // Zero-config global sync over WebSockets + local tab sync
     return {
       broadcast: (event, payload) => universalChannel.broadcast(event, payload),
       trackPresence: (data) => universalChannel.broadcast('presence_sync', data),

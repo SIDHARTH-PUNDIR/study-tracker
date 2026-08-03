@@ -764,11 +764,26 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
 
         {/* Bottom Section: Connected Members Presence, Study Duration Graphs & Focus Calendars */}
         <section>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
             <h3 style={{ fontSize: '0.95rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>
               Global Room Members ({Object.keys(members).length})
             </h3>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Realtime universal cloud sync enabled</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <button 
+                onClick={() => {
+                  if (channelRef.current) {
+                    channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
+                    channelRef.current.broadcast('REQUEST_SYNC', { newcomer: userId });
+                  }
+                }}
+                className="btn btn-subtle"
+                style={{ fontSize: '0.75rem', padding: '0.3rem 0.65rem', border: '1px solid var(--border-color)', background: 'var(--bg-panel)', cursor: 'pointer' }}
+                title="Force broadcast presence and fetch latest status from study partners"
+              >
+                🔄 Ping Partners
+              </button>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Realtime multi-network cloud sync active</span>
+            </div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: '1.5rem' }}>
