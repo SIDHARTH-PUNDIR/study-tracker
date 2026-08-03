@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { subscribeToRoomEvents, isCloudEnabled, supabase, saveCustomSupabaseConfig } from '../lib/supabase';
+import { subscribeToRoomEvents, isCloudEnabled, saveCustomSupabaseConfig } from '../lib/supabase';
 
 const getSafeSessions = (userId) => {
   try {
@@ -176,6 +176,12 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       workStartTime,
       breakSeconds,
       studyTimeHistory: studyHistory,
+      personalTimer: {
+        status: timerStatus,
+        elapsed: elapsedSeconds,
+        mode: timerMode,
+        targetDuration
+      },
       lastSeen: Date.now()
     };
     // Cache member profiles to maintain visibility after refreshing browser
@@ -184,7 +190,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       try { localStorage.setItem('global_room_members_cache', JSON.stringify(updated)); } catch {}
       return updated;
     });
-  }, [userId, userName, isOnBreak, timerStatus, objectiveText, objectiveCompleted, workStartTime, breakSeconds, studyHistory]);
+  }, [userId, userName, isOnBreak, timerStatus, elapsedSeconds, timerMode, targetDuration, objectiveText, objectiveCompleted, workStartTime, breakSeconds, studyHistory]);
 
   // 1. Live real-time clock ticker
   useEffect(() => {
@@ -194,7 +200,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     return () => clearInterval(interval);
   }, []);
 
-  // 2. Broadcast local presence & timer state over the live network channel
+  // 2. Broadcast local presence & personal timer state over the live network channel
   const broadcastMyState = (overrides = {}) => {
     const nextState = { ...myProfileRef.current, ...overrides, lastSeen: Date.now() };
     if (channelRef.current) {
@@ -234,18 +240,12 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       if (!evt || !evt.event) return;
       const { event, payload } = evt;
 
-      if (event === 'TIMER_UPDATE' && payload) {
-        if (payload.status) setTimerStatus(payload.status);
-        if (typeof payload.elapsed === 'number') setElapsedSeconds(payload.elapsed);
-        if (payload.mode) setTimerMode(payload.mode);
-        if (typeof payload.targetDuration === 'number') setTargetDuration(payload.targetDuration);
-        saveTimerStateToStorage(payload.status || 'stopped', payload.elapsed || 0, payload.mode || 'stopwatch', payload.targetDuration || 3000);
-      } else if (event === 'MEMBER_STATE_SYNC' && payload && payload.userId) {
+      if (event === 'MEMBER_STATE_SYNC' && payload && payload.userId) {
         setMembers(prev => {
           const isKnown = !!prev[payload.userId];
           const updated = { ...prev, [payload.userId]: { ...payload, lastSeen: Date.now() } };
           try { localStorage.setItem('global_room_members_cache', JSON.stringify(updated)); } catch {}
-          // If we just discovered a new partner, immediately reply with our own status!
+          // If we just discovered a new partner, immediately reply with our own status and personal focus clock!
           if (!isKnown && channelRef.current && payload.userId !== userId) {
             setTimeout(() => {
               if (channelRef.current) {
@@ -256,17 +256,9 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
           return updated;
         });
       } else if (event === 'REQUEST_SYNC' || event === 'NETWORK_CONNECTED' || event === 'presence_sync') {
-        // A study buddy joined, requested sync, or cloud network connected! Immediately send our profile AND timer!
+        // A study buddy joined, requested sync, or cloud network connected! Immediately send our profile and focus clock!
         if (channelRef.current) {
           channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
-          if (event === 'REQUEST_SYNC' || event === 'NETWORK_CONNECTED') {
-            channelRef.current.broadcast('TIMER_UPDATE', {
-              status: currentTimerRef.current.status,
-              elapsed: currentTimerRef.current.elapsed,
-              mode: currentTimerRef.current.mode,
-              targetDuration: currentTimerRef.current.target
-            });
-          }
         }
       }
     });
@@ -284,18 +276,10 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       }, delay)
     );
 
-    // High-frequency live cloud heartbeat (Every 3 seconds) so peers remain continuously synchronized
+    // High-frequency live cloud heartbeat (Every 3 seconds) so peers remain continuously synchronized without interfering with independent clocks
     const heartbeat = setInterval(() => {
       if (channelRef.current) {
         channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
-        if (currentTimerRef.current.status === 'running') {
-          channelRef.current.broadcast('TIMER_UPDATE', {
-            status: currentTimerRef.current.status,
-            elapsed: currentTimerRef.current.elapsed,
-            mode: currentTimerRef.current.mode,
-            targetDuration: currentTimerRef.current.target
-          });
-        }
       }
     }, 3000);
 
@@ -324,22 +308,10 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
             setStudyHistory({ ...latestHistory });
           }
 
-          // Broadcast live clock every 15 seconds while ticking
+          // Broadcast live clock inside personal profile every 15 seconds while ticking
           if (next % 15 === 0 && channelRef.current) {
-            channelRef.current.broadcast('TIMER_UPDATE', {
-              status: 'running',
-              elapsed: next,
-              mode: timerMode,
-              targetDuration
-            });
-            channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
-          }
-          if (isCloudEnabled && supabase && next % 30 === 0) {
-            supabase.from('room_state').upsert({
-              room_id: 'GLOBAL_STUDY_SPACE',
-              timer_status: 'running',
-              timer_seconds: next
-            }).catch(() => {});
+            const currentPT = { status: 'running', elapsed: next, mode: timerMode, targetDuration };
+            channelRef.current.broadcast('MEMBER_STATE_SYNC', { ...myProfileRef.current, personalTimer: currentPT });
           }
           return next;
         });
@@ -368,7 +340,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     return () => clearInterval(breakTimerRef.current);
   }, [isOnBreak]);
 
-  // Handlers for Shared Timer actions
+  // Handlers for Personal Timer actions
   const handleTimerControl = (newStatus, customElapsed = elapsedSeconds) => {
     setConfirmReset(false);
     let effectiveTarget = targetDuration;
@@ -381,20 +353,14 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     saveTimerStateToStorage(newStatus, customElapsed, timerMode, effectiveTarget);
     
     if (channelRef.current) {
-      channelRef.current.broadcast('TIMER_UPDATE', {
+      const updatedTimer = {
         status: newStatus,
         elapsed: customElapsed,
         mode: timerMode,
         targetDuration: effectiveTarget
-      });
-    }
-
-    if (isCloudEnabled && supabase) {
-      supabase.from('room_state').upsert({
-        room_id: 'GLOBAL_STUDY_SPACE',
-        timer_status: newStatus,
-        timer_seconds: customElapsed
-      }).catch(() => {});
+      };
+      const newStat = deriveStatus(isOnBreak, newStatus);
+      channelRef.current.broadcast('MEMBER_STATE_SYNC', { ...myProfileRef.current, personalTimer: updatedTimer, status: newStat });
     }
   };
 
@@ -403,12 +369,13 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     setTargetDuration(safeSeconds);
     saveTimerStateToStorage(timerStatus, elapsedSeconds, timerMode, safeSeconds);
     if (channelRef.current) {
-      channelRef.current.broadcast('TIMER_UPDATE', {
+      const updatedTimer = {
         status: timerStatus,
         elapsed: elapsedSeconds,
         mode: 'countdown',
         targetDuration: safeSeconds
-      });
+      };
+      channelRef.current.broadcast('MEMBER_STATE_SYNC', { ...myProfileRef.current, personalTimer: updatedTimer });
     }
   };
 
@@ -464,6 +431,15 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       return formatTime(remain);
     }
     return formatTime(elapsedSeconds);
+  };
+
+  const getMemberDisplayTime = (pt) => {
+    if (!pt) return '00:00';
+    if (pt.mode === 'countdown') {
+      const remain = Math.max(0, (pt.targetDuration || 3000) - pt.elapsed);
+      return formatTime(remain);
+    }
+    return formatTime(pt.elapsed);
   };
 
   const currentDay = new Date().getDate();
@@ -567,10 +543,10 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
         
-        {/* Top Section: Shared Session Timer */}
+        {/* Top Section: Personal Focus Timer */}
         <section style={{ textAlign: 'center', padding: '1rem 0', borderBottom: '1px solid var(--border-color)' }}>
           <div style={{ fontSize: '0.8rem', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-            Shared Room Timer ({timerMode === 'stopwatch' ? 'Count-Up' : `${getTargetLabel()} Target`})
+            Personal Focus Timer ({timerMode === 'stopwatch' ? 'Count-Up' : `${getTargetLabel()} Target`})
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1.5rem', marginBottom: '1.5rem' }}>
@@ -832,13 +808,32 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
 
               return (
                 <div key={memberId} className="panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem', borderLeft: isMe ? '3px solid #10B981' : '1px solid var(--border-color)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                       <span style={{ fontWeight: 600, fontSize: '1rem' }}>{m?.name || 'Student'} {isMe && '(You)'}</span>
                     </div>
-                    <span style={{ fontSize: '0.85rem' }}>
-                      {getStatusBadge(m?.status)}
-                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+                      {m?.personalTimer && m.personalTimer.elapsed > 0 && (
+                        <span style={{
+                          fontSize: '0.82rem',
+                          background: m.personalTimer.status === 'running' ? 'rgba(16, 185, 129, 0.15)' : 'var(--bg-subtle)',
+                          color: m.personalTimer.status === 'running' ? '#10B981' : 'var(--text-muted)',
+                          padding: '0.2rem 0.6rem',
+                          borderRadius: '14px',
+                          fontWeight: 700,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.35rem',
+                          border: m.personalTimer.status === 'running' ? '1px solid rgba(16, 185, 129, 0.35)' : '1px solid var(--border-color)',
+                          fontFamily: 'monospace'
+                        }} title={`Personal Clock (${m.personalTimer.mode || 'Count-Up'})`}>
+                          ⏱️ {getMemberDisplayTime(m.personalTimer)} {m.personalTimer.status === 'paused' ? '(Paused)' : ''}
+                        </span>
+                      )}
+                      <span style={{ fontSize: '0.85rem' }}>
+                        {getStatusBadge(m?.status)}
+                      </span>
+                    </div>
                   </div>
 
                   <div style={{ fontSize: '0.88rem', color: 'var(--text-main)', background: 'var(--bg-subtle)', padding: '0.75rem', borderRadius: 'var(--radius)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
