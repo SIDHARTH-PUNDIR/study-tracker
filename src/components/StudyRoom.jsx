@@ -242,39 +242,49 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
         saveTimerStateToStorage(payload.status || 'stopped', payload.elapsed || 0, payload.mode || 'stopwatch', payload.targetDuration || 3000);
       } else if (event === 'MEMBER_STATE_SYNC' && payload && payload.userId) {
         setMembers(prev => {
-          const updated = { ...prev, [payload.userId]: payload };
+          const isKnown = !!prev[payload.userId];
+          const updated = { ...prev, [payload.userId]: { ...payload, lastSeen: Date.now() } };
           try { localStorage.setItem('global_room_members_cache', JSON.stringify(updated)); } catch {}
+          // If we just discovered a new partner, immediately reply with our own status!
+          if (!isKnown && channelRef.current && payload.userId !== userId) {
+            setTimeout(() => {
+              if (channelRef.current) {
+                channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
+              }
+            }, 200);
+          }
           return updated;
         });
-      } else if (event === 'REQUEST_SYNC') {
-        // A study buddy joined or refreshed! Immediately send them our latest profile AND current timer!
+      } else if (event === 'REQUEST_SYNC' || event === 'NETWORK_CONNECTED' || event === 'presence_sync') {
+        // A study buddy joined, requested sync, or cloud network connected! Immediately send our profile AND timer!
         if (channelRef.current) {
           channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
-          channelRef.current.broadcast('TIMER_UPDATE', {
-            status: currentTimerRef.current.status,
-            elapsed: currentTimerRef.current.elapsed,
-            mode: currentTimerRef.current.mode,
-            targetDuration: currentTimerRef.current.target
-          });
-        }
-      } else if (event === 'presence_sync') {
-        if (channelRef.current) {
-          channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
+          if (event === 'REQUEST_SYNC' || event === 'NETWORK_CONNECTED') {
+            channelRef.current.broadcast('TIMER_UPDATE', {
+              status: currentTimerRef.current.status,
+              elapsed: currentTimerRef.current.elapsed,
+              mode: currentTimerRef.current.mode,
+              targetDuration: currentTimerRef.current.target
+            });
+          }
         }
       }
     });
 
     channelRef.current = channel;
 
-    // Announce presence and request current timer & member profiles from online peers
-    const initTimer = setTimeout(() => {
-      if (channelRef.current) {
-        channelRef.current.broadcast('MEMBER_STATE_SYNC', curMe);
-        channelRef.current.broadcast('REQUEST_SYNC', { newcomer: userId });
-      }
-    }, 300);
+    // Multi-stage rapid onboarding handshake (Ensures presence broadcast after Vercel WebSocket SSL connection completes)
+    const pingDelays = [400, 1200, 2500, 4500];
+    const initTimers = pingDelays.map(delay => 
+      setTimeout(() => {
+        if (channelRef.current) {
+          channelRef.current.broadcast('MEMBER_STATE_SYNC', curMe);
+          channelRef.current.broadcast('REQUEST_SYNC', { newcomer: userId });
+        }
+      }, delay)
+    );
 
-    // Periodic live sync heartbeat (Every 5 seconds) so friends never drop out of sync on Vercel
+    // High-frequency live cloud heartbeat (Every 3 seconds) so peers remain continuously synchronized
     const heartbeat = setInterval(() => {
       if (channelRef.current) {
         channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
@@ -287,10 +297,10 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
           });
         }
       }
-    }, 5000);
+    }, 3000);
 
     return () => {
-      clearTimeout(initTimer);
+      initTimers.forEach(t => clearTimeout(t));
       clearInterval(heartbeat);
       if (channelRef.current) {
         channelRef.current.close();

@@ -35,13 +35,14 @@ export const saveCustomSupabaseConfig = (url, key) => {
 
 export const isCloudEnabled = !!supabase;
 
-// Universal Cloud Realtime Channel (multi-network redundancy via Trystero WebRTC + SSL MQTT + Local channels)
+// Universal Cloud Realtime Channel (multi-broker cloud grid + Trystero WebRTC + local channels)
 class UniversalCloudChannel {
   constructor(roomCode, onMessage) {
     this.roomCode = roomCode || 'GLOBAL_STUDY_SPACE';
     this.onMessage = onMessage;
-    this.topic = `study-tracker-live-space-2026/room-${this.roomCode}`;
+    this.topic = `study-tracker-2026-global-unified/room-${this.roomCode}`;
     this.senderId = localStorage.getItem('current_user_id') || `usr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.clients = [];
     
     // 1. Local BroadcastChannel for instant same-machine multi-tab testing
     try {
@@ -57,7 +58,7 @@ class UniversalCloudChannel {
 
     // 2. Trystero P2P WebRTC over Decentralized Torrent Trackers (Works over standard HTTPS port 443 WebSockets!)
     try {
-      this.torrentRoom = joinTorrent({ appId: 'study-tracker-global-space-2026' }, this.roomCode);
+      this.torrentRoom = joinTorrent({ appId: 'study-tracker-2026-global-space' }, this.roomCode);
       const [sendTorrent, getTorrent] = this.torrentRoom.makeAction('room_sync');
       this.sendTorrent = sendTorrent;
       getTorrent((data) => {
@@ -74,9 +75,9 @@ class UniversalCloudChannel {
       // ignore
     }
 
-    // 3. Trystero P2P WebRTC over Global Nostr Relays (Bulletproof cross-network discovery over HTTPS!)
+    // 3. Trystero P2P WebRTC over Global Nostr Relays
     try {
-      this.nostrRoom = joinNostr({ appId: 'study-tracker-global-space-2026' }, this.roomCode);
+      this.nostrRoom = joinNostr({ appId: 'study-tracker-2026-global-space' }, this.roomCode);
       const [sendNostr, getNostr] = this.nostrRoom.makeAction('room_sync');
       this.sendNostr = sendNostr;
       getNostr((data) => {
@@ -93,62 +94,79 @@ class UniversalCloudChannel {
       // ignore
     }
 
-    // 4. Global Free WSS Cloud Broker on Standard SSL Port 8443 / 443 (Prevents firewall blockages on campus/office Wi-Fi)
-    try {
-      this.client = mqtt.connect('wss://broker.hivemq.com:8443/mqtt', {
-        clientId: `st_client_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
-        clean: true,
-        reconnectPeriod: 2500,
-        connectTimeout: 8000
-      });
+    // 4. Multi-Broker High-Speed Realtime WebSocket Cloud Grid
+    // Opens simultaneous WebSocket connections to the world's most robust public real-time brokers (Shiftr, EMQX, HiveMQ, Mosquitto)
+    const brokerUrls = [
+      'wss://public:public@public.cloud.shiftr.io',
+      'wss://broker.emqx.io:8084/mqtt',
+      'wss://broker.hivemq.com:8443/mqtt',
+      'wss://test.mosquitto.org:8081'
+    ];
 
-      this.client.on('connect', () => {
-        this.client.subscribe(this.topic, { qos: 0 });
-      });
+    brokerUrls.forEach((url) => {
+      try {
+        const c = mqtt.connect(url, {
+          clientId: `st_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          clean: true,
+          reconnectPeriod: 2500,
+          connectTimeout: 7000
+        });
 
-      this.client.on('message', (topic, message) => {
-        try {
-          const data = JSON.parse(message.toString());
-          if (this.onMessage && data && data.senderId !== this.senderId) {
-            this.onMessage(data);
+        c.on('connect', () => {
+          console.log('⚡ Connected to Realtime Cloud Relay:', url);
+          c.subscribe(this.topic, { qos: 0 });
+          // Notify application immediately upon connecting to perform instant presence handshake!
+          if (this.onMessage) {
+            this.onMessage({ event: 'NETWORK_CONNECTED', payload: { broker: url } });
+            this.onMessage({ event: 'REQUEST_SYNC' });
           }
-        } catch {
-          // ignore malformed packets
-        }
-      });
-    } catch {
-      // ignore network errors
-    }
+        });
+
+        c.on('message', (t, msg) => {
+          try {
+            const data = JSON.parse(msg.toString());
+            if (this.onMessage && data && data.senderId !== this.senderId) {
+              this.onMessage(data);
+            }
+          } catch {
+            // ignore malformed packets
+          }
+        });
+
+        this.clients.push(c);
+      } catch {
+        // ignore network errors for specific broker
+      }
+    });
   }
 
   broadcast(event, payload) {
     const packet = { event, payload, senderId: this.senderId, timestamp: Date.now() };
+    const jsonStr = JSON.stringify(packet);
     
-    // Broadcast via local tab channel
+    // 1. Local Tabs
     if (this.localChannel) {
       try { this.localChannel.postMessage(packet); } catch {}
     }
-    // Broadcast via WebRTC P2P (Torrent trackers)
-    if (this.sendTorrent) {
-      try { this.sendTorrent(packet); } catch {}
-    }
-    // Broadcast via WebRTC P2P (Nostr relays)
-    if (this.sendNostr) {
-      try { this.sendNostr(packet); } catch {}
-    }
-    // Broadcast via SSL WebSocket MQTT relay
-    if (this.client && this.client.connected) {
-      try {
-        this.client.publish(this.topic, JSON.stringify(packet), { qos: 0 });
-      } catch {}
-    }
+    // 2. WebRTC P2P
+    if (this.sendTorrent) { try { this.sendTorrent(packet); } catch {} }
+    if (this.sendNostr) { try { this.sendNostr(packet); } catch {} }
+
+    // 3. Cloud WebSocket Grid (Broadcast across ALL open brokers simultaneously!)
+    this.clients.forEach((c) => {
+      if (c && c.connected) {
+        try {
+          c.publish(this.topic, jsonStr, { qos: 0 });
+        } catch {}
+      }
+    });
   }
 
   close() {
     if (this.localChannel) { try { this.localChannel.close(); } catch {} }
     if (this.torrentRoom) { try { this.torrentRoom.leave(); } catch {} }
     if (this.nostrRoom) { try { this.nostrRoom.leave(); } catch {} }
-    if (this.client) { try { this.client.end(); } catch {} }
+    this.clients.forEach((c) => { try { c.end(); } catch {} });
   }
 }
 
@@ -178,6 +196,7 @@ export const subscribeToRoomEvents = (roomCode, onEvent) => {
             userId: localStorage.getItem('current_user_id'),
             onlineAt: new Date().toISOString()
           });
+          onEvent({ event: 'REQUEST_SYNC' });
         }
       });
 
