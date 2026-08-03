@@ -208,7 +208,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     }
     // Record objective completions to calendar history
     if (overrides.objectiveCompleted !== undefined || overrides.objectiveText !== undefined) {
-      const today = new Date().toISOString().split('T')[0];
+      const today = getStudyDateKey();
       const sess = getSafeSessions(userId);
       const existingIdx = sess.findIndex(s => s && s.date === today);
       if (existingIdx >= 0) {
@@ -442,8 +442,14 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     return formatTime(pt.elapsed);
   };
 
-  const currentDay = new Date().getDate();
-  const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+  const getEffectiveStudyDate = () => {
+    const d = new Date();
+    if (d.getHours() < 5) d.setDate(d.getDate() - 1);
+    return d;
+  };
+  const activeStudyDate = getEffectiveStudyDate();
+  const currentDay = activeStudyDate.getDate();
+  const daysInMonth = new Date(activeStudyDate.getFullYear(), activeStudyDate.getMonth() + 1, 0).getDate();
 
   const getStatusBadge = (status) => {
     if (status === 'break') return <span style={{ color: 'var(--status-break)', fontWeight: 600 }}>🟡 On break</span>;
@@ -701,50 +707,99 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
           )}
         </section>
 
-        {/* Middle Section: Personal Action Pad (Objective & Break Toggle) */}
-        <section className="panel" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
-            <div>
-              <h2 style={{ fontSize: '1.05rem', fontWeight: 600, color: 'var(--text-main)' }}>Your Today's Objective</h2>
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Working since {workStartTime} • Total break today: {Math.floor(breakSeconds / 60)}m {breakSeconds % 60}s</span>
+        {/* Middle Section: Personal Action Pad & Marathon Study Timetable */}
+        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.5rem', marginBottom: '0.5rem' }}>
+          {/* Left: Today's Objective & Break Toggle */}
+          <div className="panel" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '1.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <h2 style={{ fontSize: '1.05rem', fontWeight: 600, color: 'var(--text-main)' }}>Your Today's Objective</h2>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Working since {workStartTime} • Total break: {Math.floor(breakSeconds / 60)}m {breakSeconds % 60}s</span>
+              </div>
+
+              <button 
+                onClick={handleToggleBreak}
+                className="btn btn-subtle"
+                style={{ 
+                  background: isOnBreak ? 'var(--status-break)' : 'var(--bg-panel)',
+                  color: isOnBreak ? '#0C0A09' : 'var(--text-main)',
+                  border: '1px solid var(--border-color)',
+                  fontSize: '0.85rem'
+                }}
+              >
+                {isOnBreak ? '☕ Resume Focus' : 'Take a short break'}
+              </button>
             </div>
 
-            <button 
-              onClick={handleToggleBreak}
-              className="btn btn-subtle"
-              style={{ 
-                background: isOnBreak ? 'var(--status-break)' : 'var(--bg-panel)',
-                color: isOnBreak ? '#0C0A09' : 'var(--text-main)',
-                border: '1px solid var(--border-color)',
-                fontSize: '0.85rem'
-              }}
-            >
-              {isOnBreak ? '☕ Resume Focus' : 'Take a short break'}
-            </button>
+            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+              <input 
+                type="checkbox"
+                checked={objectiveCompleted}
+                onChange={(e) => handleObjectiveChange(objectiveText, e.target.checked)}
+                style={{ width: '22px', height: '22px', accentColor: '#10B981', cursor: 'pointer', borderRadius: '4px' }}
+                title="Mark today's objective completed"
+              />
+              <input 
+                type="text"
+                placeholder="What is your main target today? (e.g., 7 LeetCode questions)"
+                value={objectiveText}
+                onChange={(e) => handleObjectiveChange(e.target.value, objectiveCompleted)}
+                className="field-input"
+                style={{ 
+                  textDecoration: 'none',
+                  color: 'var(--text-main)',
+                  fontSize: '0.95rem',
+                  background: 'var(--bg-app)',
+                  flex: 1
+                }}
+              />
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-            <input 
-              type="checkbox"
-              checked={objectiveCompleted}
-              onChange={(e) => handleObjectiveChange(objectiveText, e.target.checked)}
-              style={{ width: '22px', height: '22px', accentColor: '#10B981', cursor: 'pointer', borderRadius: '4px' }}
-              title="Mark today's objective completed"
-            />
-            <input 
-              type="text"
-              placeholder="What is your main target for this session? (e.g., Read chapter 4, finish problem set)"
-              value={objectiveText}
-              onChange={(e) => handleObjectiveChange(e.target.value, objectiveCompleted)}
-              className="field-input"
-              style={{ 
-                textDecoration: 'none',
-                color: 'var(--text-main)',
-                fontSize: '0.95rem',
-                background: 'var(--bg-app)',
-                flex: 1
-              }}
-            />
+          {/* Right side small box: Night Marathon Study Timetable */}
+          <div className="panel" style={{ background: 'var(--bg-subtle)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.6rem' }}>
+              <span style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                🌙 Night Marathon Timetable
+              </span>
+              <span style={{ fontSize: '0.72rem', background: 'var(--accent)', color: '#fff', padding: '0.15rem 0.5rem', borderRadius: '12px', fontWeight: 600 }}>11:00 PM - 4:30 AM</span>
+            </div>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', maxHeight: '180px', overflowY: 'auto', paddingRight: '0.25rem' }}>
+              {[
+                { time: '11:00 - 11:10 PM', title: '🚪 Arrival & Warmup', desc: '10 min setup & goal planning', type: 'setup' },
+                { time: '11:10 - 12:00 AM', title: '⚡ Focus Session 1', desc: '50 mins deep focus', type: 'study' },
+                { time: '12:00 - 12:15 AM', title: '☕ Coffee Break', desc: '15 mins recharge', type: 'break' },
+                { time: '12:15 - 1:30 AM', title: '🧠 Focus Session 2', desc: '1h 15m intense problem solving', type: 'study' },
+                { time: '1:30 - 1:45 AM', title: '🌿 15 min Break', desc: '15 mins relax & stretching', type: 'break' },
+                { time: '1:45 - 3:15 AM', title: '🔥 Focus Session 3', desc: '1h 30m endurance study', type: 'study' },
+                { time: '3:15 - 3:30 AM', title: '🎵 15 min Break', desc: '15 mins breather before final push', type: 'break' },
+                { time: '3:30 - 4:30 AM', title: '🚀 Final Push (Session 4)', desc: '1 hour sprint to finish line', type: 'study' },
+                { time: '10:00 AM (Subah)', title: '☀️ Morning Check-in', desc: 'Subah 10 bje wake & review', type: 'setup' }
+              ].map((slot, idx) => {
+                const isBreak = slot.type === 'break';
+                return (
+                  <div key={idx} style={{ 
+                    display: 'flex', 
+                    justifyContent: 'space-between', 
+                    alignItems: 'center', 
+                    padding: '0.45rem 0.65rem', 
+                    background: 'var(--bg-app)', 
+                    borderRadius: '6px', 
+                    borderLeft: isBreak ? '3px solid #EAB308' : (slot.type === 'study' ? '3px solid #10B981' : '3px solid var(--text-muted)'),
+                    fontSize: '0.78rem'
+                  }}>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>{slot.title}</span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>{slot.desc}</span>
+                    </div>
+                    <span style={{ fontSize: '0.74rem', fontWeight: 700, color: isBreak ? '#EAB308' : (slot.type === 'study' ? '#10B981' : 'var(--text-muted)'), whiteSpace: 'nowrap', marginLeft: '0.5rem' }}>
+                      {slot.time}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </section>
 
@@ -780,7 +835,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
               const doneDays = userSessions.filter(s => s && s.objectiveCompleted).map(s => {
                 const d = new Date(s.date);
                 return !isNaN(d) ? d.getDate() : null;
-              }).filter(d => d !== null);
+              }).filter(d => d !== null && d <= currentDay);
 
               if (m?.objectiveCompleted && !doneDays.includes(currentDay)) {
                 doneDays.push(currentDay);
@@ -947,8 +1002,38 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
 
                   {/* Full Month Focus Calendar for member (Green = Work Done, Grey = No Work Done) */}
                   <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Focus Calendar:</span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem', flexWrap: 'wrap', gap: '0.4rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Focus Calendar:</span>
+                        {isMe && (
+                          <button
+                            onClick={() => {
+                              if (window.confirm("Clean accidental test records from Days 2 & 4, and accurately set Day 3 to your genuine 1h 10m (70 minutes) session?")) {
+                                const yr = activeStudyDate.getFullYear();
+                                const mo = String(activeStudyDate.getMonth() + 1).padStart(2, '0');
+                                const day3Key = `${yr}-${mo}-03`;
+                                const cleanHistory = { [day3Key]: 4200 }; // 1h 10m in seconds
+                                localStorage.setItem(`study_time_history_${userId}`, JSON.stringify(cleanHistory));
+                                
+                                const sess = [{ date: day3Key, objectiveCompleted: true, objectiveText: objectiveText || '7 leetcode question' }];
+                                localStorage.setItem(`sessions_${userId}`, JSON.stringify(sess));
+                                setStudyHistory({ ...cleanHistory });
+                                
+                                myProfileRef.current.studyTimeHistory = cleanHistory;
+                                if (channelRef.current) {
+                                  channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
+                                }
+                                alert("✅ Cleaned! Day 2 & 4 reset to zero. Day 3 set to 1h 10m.");
+                              }
+                            }}
+                            className="btn btn-subtle"
+                            style={{ fontSize: '0.68rem', padding: '0.15rem 0.5rem', minHeight: 'auto', border: '1px solid var(--border-color)', background: 'var(--bg-panel)', color: 'var(--text-main)', cursor: 'pointer', borderRadius: '12px' }}
+                            title="Reset accidental test entries from calendar and keep only genuine study time"
+                          >
+                            🧹 Clean Test Dates
+                          </button>
+                        )}
+                      </div>
                       <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>🟢 Work Done • ⚪ No Work</span>
                     </div>
                     <div style={{ 
@@ -976,8 +1061,8 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
                           daySecs = Math.max(daySecs, todayGraphSecs);
                         }
 
-                        const isDone = doneDays.includes(dayNum) || (isToday && m?.objectiveCompleted) || daySecs > 0;
                         const isPastOrToday = dayNum <= currentDay;
+                        const isDone = isPastOrToday && (doneDays.includes(dayNum) || (isToday && m?.objectiveCompleted) || daySecs > 0);
 
                         // Green (#10B981) if study work or objective is done; Grey if no work done
                         const cellBackground = isDone ? '#10B981' : (isPastOrToday ? 'var(--border-color)' : 'transparent');
