@@ -967,11 +967,19 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
                       ))}
 
                       {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((dayNum) => {
-                        const isDone = doneDays.includes(dayNum) || (dayNum === currentDay && m?.objectiveCompleted);
-                        const isPastOrToday = dayNum <= currentDay;
                         const isToday = dayNum === currentDay;
+                        const now = new Date();
+                        const localDayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                        let daySecs = memberHistory[localDayKey] || 0;
+                        if (isToday) {
+                          const todayGraphSecs = daysList[numDays - 1]?.secs || 0;
+                          daySecs = Math.max(daySecs, todayGraphSecs);
+                        }
 
-                        // Green (#10B981) if work is done; Grey if no work done
+                        const isDone = doneDays.includes(dayNum) || (isToday && m?.objectiveCompleted) || daySecs > 0;
+                        const isPastOrToday = dayNum <= currentDay;
+
+                        // Green (#10B981) if study work or objective is done; Grey if no work done
                         const cellBackground = isDone ? '#10B981' : (isPastOrToday ? 'var(--border-color)' : 'transparent');
                         const cellColor = isDone ? '#FFFFFF' : 'var(--text-muted)';
                         const cellOpacity = isPastOrToday || isDone ? 1 : 0.25;
@@ -982,6 +990,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
                             style={{
                               aspectRatio: '1/1',
                               display: 'flex',
+                              flexDirection: 'column',
                               alignItems: 'center',
                               justifyContent: 'center',
                               fontSize: '0.72rem',
@@ -991,11 +1000,18 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
                               fontWeight: isPastOrToday || isDone ? 700 : 400,
                               border: isToday && !isDone ? '2px solid var(--text-muted)' : 'none',
                               boxShadow: isDone ? '0 1px 3px rgba(16, 185, 129, 0.3)' : 'none',
-                              opacity: cellOpacity
+                              opacity: cellOpacity,
+                              padding: '0.1rem',
+                              overflow: 'hidden'
                             }}
-                            title={`Day ${dayNum}: ${isDone ? 'Work completed 🟢' : (isPastOrToday ? 'No work done ⚪' : 'Upcoming')}`}
+                            title={`Day ${dayNum}: Studied for ${formatDurationLabel(daySecs)} ${isDone ? '• Work completed 🟢' : (isPastOrToday ? '• No work done ⚪' : '• Upcoming')}`}
                           >
-                            {dayNum}
+                            <span>{dayNum}</span>
+                            {daySecs > 0 && (
+                              <span style={{ fontSize: '0.55rem', opacity: 0.95, fontWeight: 700, marginTop: '0.1rem', background: 'rgba(0, 0, 0, 0.18)', padding: '0.05rem 0.2rem', borderRadius: '3px', whiteSpace: 'nowrap' }}>
+                                {formatDurationLabel(daySecs)}
+                              </span>
+                            )}
                           </div>
                         );
                       })}
