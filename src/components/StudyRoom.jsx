@@ -11,6 +11,46 @@ const getSafeSessions = (userId) => {
   }
 };
 
+// Late-night marathon rule: sessions occurring between midnight and 5:00 AM belong to the previous evening's study date!
+const getStudyDateKey = (date = new Date()) => {
+  const d = new Date(date);
+  if (d.getHours() < 5) {
+    d.setDate(d.getDate() - 1);
+  }
+  return d.toISOString().split('T')[0];
+};
+
+const getStudyTimeHistory = (uid) => {
+  try {
+    const data = localStorage.getItem(`study_time_history_${uid}`);
+    return data ? JSON.parse(data) : {};
+  } catch {
+    return {};
+  }
+};
+
+const updateStudyTime = (uid, dateKey, secondsDelta = 1) => {
+  try {
+    const history = getStudyTimeHistory(uid);
+    history[dateKey] = (history[dateKey] || 0) + secondsDelta;
+    localStorage.setItem(`study_time_history_${uid}`, JSON.stringify(history));
+    return history;
+  } catch {
+    return {};
+  }
+};
+
+const formatDurationLabel = (totalSecs) => {
+  if (!totalSecs || totalSecs <= 0) return '0m';
+  const h = Math.floor(totalSecs / 3600);
+  const m = Math.floor((totalSecs % 3600) / 60);
+  const s = totalSecs % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
+};
+
 const getInitialTimerState = () => {
   try {
     const saved = localStorage.getItem('global_room_timer_state');
@@ -79,6 +119,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
   const [workStartTime] = useState(() => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }));
   const [breakSeconds, setBreakSeconds] = useState(0);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [studyHistory, setStudyHistory] = useState(() => getStudyTimeHistory(userId));
 
   // Helper: Derive presence status automatically from break toggle & timer status
   const deriveStatus = (isBreak, tStatus) => {
@@ -96,6 +137,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       objectiveCompleted,
       workStartTime: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }),
       breakSeconds: 0,
+      studyTimeHistory: getStudyTimeHistory(userId),
       lastSeen: Date.now()
     };
     try {
@@ -111,6 +153,11 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
   const breakTimerRef = useRef(null);
   const myProfileRef = useRef({ userId, name: userName });
   const currentTimerRef = useRef({ status: timerStatus, elapsed: elapsedSeconds, mode: timerMode, target: targetDuration });
+  const isOnBreakRef = useRef(isOnBreak);
+
+  useEffect(() => {
+    isOnBreakRef.current = isOnBreak;
+  }, [isOnBreak]);
 
   // Keep refs synchronized to latest state for instantaneous broadcasts
   useEffect(() => {
@@ -127,6 +174,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       objectiveCompleted,
       workStartTime,
       breakSeconds,
+      studyTimeHistory: studyHistory,
       lastSeen: Date.now()
     };
     // Cache member profiles to maintain visibility after refreshing browser
@@ -135,7 +183,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       try { localStorage.setItem('global_room_members_cache', JSON.stringify(updated)); } catch {}
       return updated;
     });
-  }, [userId, userName, isOnBreak, timerStatus, objectiveText, objectiveCompleted, workStartTime, breakSeconds]);
+  }, [userId, userName, isOnBreak, timerStatus, objectiveText, objectiveCompleted, workStartTime, breakSeconds, studyHistory]);
 
   // 1. Live real-time clock ticker
   useEffect(() => {
@@ -250,13 +298,21 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 4. Shared Session Timer ticker logic
+  // 4. Shared Session Timer ticker logic & Study Time History accumlator
   useEffect(() => {
     if (timerStatus === 'running') {
       timerRef.current = setInterval(() => {
         setElapsedSeconds((prev) => {
           const next = prev + 1;
           saveTimerStateToStorage('running', next, timerMode, targetDuration);
+          
+          // If user is actively studying (not on break), accumulate seconds in today's marathon study history!
+          if (!isOnBreakRef.current) {
+            const dateKey = getStudyDateKey();
+            const latestHistory = updateStudyTime(userId, dateKey, 1);
+            setStudyHistory({ ...latestHistory });
+          }
+
           // Broadcast live clock every 15 seconds while ticking
           if (next % 15 === 0 && channelRef.current) {
             channelRef.current.broadcast('TIMER_UPDATE', {
@@ -265,6 +321,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
               mode: timerMode,
               targetDuration
             });
+            channelRef.current.broadcast('MEMBER_STATE_SYNC', myProfileRef.current);
           }
           if (isCloudEnabled && supabase && next % 30 === 0) {
             supabase.from('room_state').upsert({
@@ -280,7 +337,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
       clearInterval(timerRef.current);
     }
     return () => clearInterval(timerRef.current);
-  }, [timerStatus, timerMode, targetDuration]);
+  }, [timerStatus, timerMode, targetDuration, userId]);
 
   // 5. Break time accumulator logic
   useEffect(() => {
@@ -415,8 +472,8 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
           <div className="panel" style={{ width: '100%', maxWidth: '480px', display: 'flex', flexDirection: 'column', gap: '1.25rem', border: '1px solid var(--border-color)' }}>
             <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-main)' }}>🌐 Enable Global Cloud Sync</h3>
             <p className="text-muted" style={{ fontSize: '0.88rem', lineHeight: 1.5 }}>
-              When deployed on Vercel, peers on separate devices need a shared Supabase real-time channel to see each other's timers and calendars instantly.<br/><br/>
-              Enter your free Supabase URL and Anon Key below (or set them in Vercel project environment settings):
+              When deployed on Vercel, peers on separate devices use our Zero-Config WebSocket Network or a shared Supabase cloud channel to see each other instantly.<br/><br/>
+              To link a dedicated Supabase Postgres DB, enter your URL and Anon Key below (optional):
             </p>
             <div className="field-group" style={{ marginBottom: 0 }}>
               <label className="field-label">Supabase Project URL</label>
@@ -439,7 +496,7 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
               />
             </div>
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
-              <button onClick={() => setShowSyncModal(false)} className="btn btn-subtle">Cancel</button>
+              <button onClick={() => setShowSyncModal(false)} className="btn btn-subtle">Close</button>
               <button 
                 onClick={() => saveCustomSupabaseConfig(inputUrl, inputKey)}
                 className="btn btn-primary"
@@ -468,10 +525,10 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
           <button
             onClick={() => setShowSyncModal(true)}
             className="btn btn-subtle"
-            style={{ fontSize: '0.82rem', padding: '0.4rem 0.75rem', border: '1px solid var(--border-color)', background: isCloudEnabled ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)' }}
+            style={{ fontSize: '0.82rem', padding: '0.4rem 0.75rem', border: '1px solid var(--border-color)', background: isCloudEnabled ? 'rgba(16, 185, 129, 0.1)' : 'rgba(16, 185, 129, 0.1)' }}
             title="Click to manage live cloud synchronization across devices"
           >
-            {isCloudEnabled ? '🟢 Live Cloud Connected' : '⚡ Setup Vercel Cloud Sync'}
+            {isCloudEnabled ? '🟢 Live Cloud Connected' : '🌐 Universal Zero-Config Sync Active'}
           </button>
 
           <span className="mono" style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
@@ -704,16 +761,16 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
           </div>
         </section>
 
-        {/* Bottom Section: Connected Members Presence & Full Month Focus Calendars */}
+        {/* Bottom Section: Connected Members Presence, Study Duration Graphs & Focus Calendars */}
         <section>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
             <h3 style={{ fontSize: '0.95rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>
               Global Room Members ({Object.keys(members).length})
             </h3>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Realtime global sync enabled</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Realtime universal cloud sync enabled</span>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '1.25rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: '1.5rem' }}>
             {Object.values(members).map((m) => {
               const memberId = m?.userId || 'guest';
               const isMe = memberId === userId;
@@ -726,6 +783,23 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
               if (m?.objectiveCompleted && !doneDays.includes(currentDay)) {
                 doneDays.push(currentDay);
               }
+
+              // Calculate 7-Day Study Time History and Marathons for this member
+              const memberHistory = m?.studyTimeHistory || getStudyTimeHistory(memberId);
+              const daysList = Array.from({ length: 7 }, (_, i) => {
+                const d = new Date();
+                if (d.getHours() < 5) d.setDate(d.getDate() - 1);
+                d.setDate(d.getDate() - (6 - i));
+                const key = d.toISOString().split('T')[0];
+                const label = i === 6 ? 'Today' : d.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' }).split(',')[0];
+                const secs = memberHistory[key] || 0;
+                return { key, label, secs };
+              });
+
+              const totalWeekSecs = daysList.reduce((acc, curr) => acc + curr.secs, 0);
+              const todaySecs = daysList[6]?.secs || 0;
+              const avgSecs = Math.floor(totalWeekSecs / 7);
+              const maxDaySecs = Math.max(3600 * 4, ...daysList.map(d => d.secs)); // scale relative to at least 4 hours
 
               return (
                 <div key={memberId} className="panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem', borderLeft: isMe ? '3px solid #10B981' : '1px solid var(--border-color)' }}>
@@ -743,6 +817,58 @@ export default function StudyRoom({ user, onLogout, darkMode, setDarkMode }) {
                     <span style={{ textDecoration: 'none', color: 'var(--text-main)', fontStyle: m?.objectiveText ? 'normal' : 'italic', fontWeight: 500 }}>
                       {m?.objectiveText || 'No objective set for today'}
                     </span>
+                  </div>
+
+                  {/* 📈 Date vs. Time Study Duration & Marathon Graph */}
+                  <div style={{ background: 'var(--bg-app)', padding: '1rem', borderRadius: 'var(--radius)', border: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+                      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                        📈 Study Duration & Marathons
+                      </span>
+                      <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#10B981', background: 'rgba(16, 185, 129, 0.15)', padding: '0.15rem 0.5rem', borderRadius: '999px', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                        Today: {formatDurationLabel(todaySecs)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '1rem', fontStyle: 'italic' }}>
+                      🌙 Sessions running across midnight up to 5 AM count in one continuous go!
+                    </div>
+
+                    {/* Bar Chart Container */}
+                    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', height: '140px', gap: '0.4rem', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                      {daysList.map((col, idx) => {
+                        const isTodayCol = idx === 6;
+                        const barHeightPct = Math.max(4, Math.min(100, Math.round((col.secs / maxDaySecs) * 100)));
+                        return (
+                          <div key={col.key} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.35rem', height: '100%', justifyContent: 'flex-end' }}>
+                            <span style={{ fontSize: '0.68rem', fontWeight: 600, color: col.secs > 0 ? 'var(--text-main)' : 'var(--text-muted)', textAlign: 'center' }}>
+                              {formatDurationLabel(col.secs)}
+                            </span>
+                            <div 
+                              style={{
+                                width: '100%',
+                                maxWidth: '32px',
+                                height: `${barHeightPct}%`,
+                                background: col.secs > 0 ? (isTodayCol ? '#10B981' : 'linear-gradient(to top, var(--bg-panel), #10B981)') : 'var(--bg-subtle)',
+                                borderRadius: '4px 4px 0 0',
+                                border: col.secs > 0 ? '1px solid #059669' : '1px dashed var(--border-color)',
+                                transition: 'height 0.3s ease',
+                                boxShadow: col.secs > 0 && isTodayCol ? '0 0 8px rgba(16, 185, 129, 0.35)' : 'none'
+                              }}
+                              title={`${col.label} (${col.key}): Studied ${formatDurationLabel(col.secs)}`}
+                            />
+                            <span style={{ fontSize: '0.68rem', color: isTodayCol ? '#10B981' : 'var(--text-muted)', fontWeight: isTodayCol ? 700 : 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '44px' }}>
+                              {col.label}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Summary Footer */}
+                    <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', marginTop: '0.75rem', fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600 }}>
+                      <span>🔥 7-Day Total: <strong style={{ color: '#10B981' }}>{formatDurationLabel(totalWeekSecs)}</strong></span>
+                      <span>⚡ Daily Avg: <strong>{formatDurationLabel(avgSecs)}</strong></span>
+                    </div>
                   </div>
 
                   {/* Full Month Focus Calendar for member (Green = Work Done, Grey = No Work Done) */}
